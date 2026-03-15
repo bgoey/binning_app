@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Monotonic Binning Studio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- ── SIDEBAR ── -->
+  <aside id="sidebar">
+    <div class="logo">
+      <span class="logo-mark">⬡</span>
+      <span class="logo-text">BinStudio</span>
+    </div>
+
+    <!-- Step 1: Upload -->
+    <section class="panel" id="panel-upload">
+      <div class="panel-head">
+        <span class="step-dot active" data-step="1">1</span>
+        <span class="panel-title">Load dataset</span>
+      </div>
+      <div class="drop-zone" id="dropZone">
+        <div class="drop-icon">↑</div>
+        <div class="drop-label">Drop CSV / Excel here</div>
+        <div class="drop-sub">or click to browse</div>
+        <input type="file" id="fileInput" accept=".csv,.xlsx,.xls" hidden>
+      </div>
+      <div id="uploadInfo" class="upload-info" style="display:none"></div>
+    </section>
+
+    <!-- Step 2: Configure -->
+    <section class="panel" id="panel-config" style="display:none">
+      <div class="panel-head">
+        <span class="step-dot" data-step="2">2</span>
+        <span class="panel-title">Configure columns</span>
+      </div>
+      <div class="config-field">
+        <label>Outcome variable (binary 0/1)</label>
+        <select id="outcomeSelect"><option value="">— select —</option></select>
+      </div>
+      <div id="colAssign" class="col-assign"></div>
+      <div class="config-row">
+        <div class="config-field half">
+          <label>Bins</label>
+          <input type="number" id="maxBins" value="20" min="2" max="50">
+        </div>
+        <div class="config-field half">
+          <label>Min bin %</label>
+          <input type="number" id="minPct" value="1" min="0" max="40">
+        </div>
+      </div>
+
+      <!-- Default binning mode (per-column can override) -->
+      <div class="config-field" style="margin-top:2px">
+        <label>Default mode <span style="font-weight:400;opacity:0.5">(per-variable override available)</span></label>
+        <div class="mode-toggle" id="binModeToggle">
+          <button class="mode-btn active" data-mode="equal_width">Equal width</button>
+          <button class="mode-btn" data-mode="monotonic">Monotonic</button>
+        </div>
+        <div class="mode-hint" id="modeHint">Splits the range into equal-width intervals</div>
+      </div>
+
+      <button class="btn-primary" id="runBtn">Run binning →</button>
+    </section>
+
+    <!-- Step 3: Export -->
+    <section class="panel" id="panel-export" style="display:none">
+      <div class="panel-head">
+        <span class="step-dot" data-step="3">3</span>
+        <span class="panel-title">Export</span>
+      </div>
+      <button class="btn-outline" id="exportCodeBtn">Export Python transformer</button>
+      <button class="btn-outline" id="exportCsvBtn">Export WoE table (CSV)</button>
+      <button class="btn-outline" id="exportExcelBtn">Export WoE + charts (Excel)</button>
+    </section>
+
+  </aside>
+
+  <!-- ── MAIN ── -->
+  <main id="main">
+
+    <!-- Empty state -->
+    <div id="emptyState" class="empty-state">
+      <div class="empty-icon">⬡</div>
+      <h2>Monotonic Binning Studio</h2>
+      <p>Upload a dataset and configure columns to begin.<br>Supports CSV and Excel files.</p>
+    </div>
+
+    <!-- Results area -->
+    <div id="resultsArea" style="display:none">
+      <div class="results-header">
+        <div class="results-meta" id="resultsMeta"></div>
+        <div class="col-tabs" id="colTabs"></div>
+      </div>
+      <div id="colContent"></div>
+    </div>
+
+  </main>
+</div>
+
+<!-- Code modal -->
+<div id="codeModal" class="modal" style="display:none">
+  <div class="modal-box">
+    <div class="modal-head">
+      <span>Python transformer</span>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <pre id="codeOutput" class="code-pre"></pre>
+    <div class="modal-foot">
+      <button class="btn-primary" onclick="copyCode()">Copy to clipboard</button>
+      <button class="btn-outline" onclick="downloadCode()">Download .py</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="/static/js/app.js"></script>
+</body>
+</html>

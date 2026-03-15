@@ -1,0 +1,12 @@
+# Core
+flask>=2.3
+numpy>=1.23
+
+# Fast I/O (strongly recommended for 4M rows / 500 cols)
+polars>=0.20
+# pandas still needed for Excel fallback + column profiling
+pandas>=1.5
+openpyxl>=3.1
+
+# For building the C extension (only needed once, on dev/build machine)
+# setuptools>=68
