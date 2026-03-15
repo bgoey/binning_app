@@ -142,39 +142,51 @@ def generate_woe_csv(binning_results: dict) -> str:
 
 
 
+
 def generate_woe_excel(binning_results: dict, outcome_col: str = "target") -> bytes:
     """
-    Build a polished Excel workbook with a true combo bar+line chart per column.
-    Uses raw XML injection because openpyxl's bar += line operator is broken.
+    Build a polished Excel workbook using xlsxwriter.
+    One sheet per column: WoE table (left) + combo bar+line chart (right).
+    Event rate line is on the secondary (right) Y axis.
     Returns raw .xlsx bytes.
     """
-    import io, zipfile
-    from openpyxl import Workbook
-    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-    from openpyxl.utils import get_column_letter
-    from openpyxl.drawing.spreadsheet_drawing import (
-        SpreadsheetDrawing, OneCellAnchor, AnchorMarker
-    )
-    from openpyxl.drawing.xdr import XDRPositiveSize2D
-    from openpyxl.drawing.spreadsheet_drawing import AnchorClientData
+    import io
+    import xlsxwriter
 
-    # ── Palette ──────────────────────────────────────────────────────
-    WHITE       = "FFFFFFFF"
-    HEADER_FILL = "FF1F3864"
-    ALT_FILL    = "FFF2F2F2"
+    buf = io.BytesIO()
+    wb  = xlsxwriter.Workbook(buf, {"in_memory": True})
 
-    def _side(): return Side(style="thin", color="FFD9D9D9")
-    def _border(): return Border(left=_side(), right=_side(), top=_side(), bottom=_side())
-    def _hdr(): return PatternFill("solid", fgColor=HEADER_FILL)
-    def _alt(): return PatternFill("solid", fgColor=ALT_FILL)
-    def _wht(): return PatternFill("solid", fgColor=WHITE)
+    # ── Formats ──────────────────────────────────────────────────────
+    def fmt(**kw):
+        defaults = {"font_name": "Arial", "font_size": 10, "border": 1,
+                    "border_color": "#D9D9D9"}
+        defaults.update(kw)
+        return wb.add_format(defaults)
 
-    def sc(cell, bold=False, fill=None, fc="FF000000", align="left", fmt=None):
-        cell.font      = Font(name="Arial", bold=bold, color=fc, size=10)
-        cell.alignment = Alignment(horizontal=align, vertical="center")
-        if fill: cell.fill = fill
-        if fmt:  cell.number_format = fmt
-        cell.border = _border()
+    F = {
+        "title":    fmt(font_size=13, bold=True,  font_color="#1F3864", border=0),
+        "subtitle": fmt(font_size=9,  italic=True, font_color="#666666", border=0),
+        "hdr":      fmt(bold=True, bg_color="#1F3864", font_color="#FFFFFF",
+                        align="center", valign="vcenter"),
+        "lbl":      fmt(align="left",  valign="vcenter", bg_color="#FFFFFF"),
+        "lbl_alt":  fmt(align="left",  valign="vcenter", bg_color="#F2F2F2"),
+        "num":      fmt(align="right", valign="vcenter", bg_color="#FFFFFF"),
+        "num_alt":  fmt(align="right", valign="vcenter", bg_color="#F2F2F2"),
+        "pct":      fmt(align="right", valign="vcenter", bg_color="#FFFFFF",
+                        num_format="0.00%"),
+        "pct_alt":  fmt(align="right", valign="vcenter", bg_color="#F2F2F2",
+                        num_format="0.00%"),
+        "woe":      fmt(align="right", valign="vcenter", bg_color="#FFFFFF",
+                        num_format="0.00000"),
+        "woe_alt":  fmt(align="right", valign="vcenter", bg_color="#F2F2F2",
+                        num_format="0.00000"),
+        "tot":      fmt(bold=True, bg_color="#E2EFDA", align="right",
+                        num_format="#,##0"),
+        "tot_woe":  fmt(bold=True, bg_color="#E2EFDA", align="right",
+                        num_format="0.00000"),
+        "ctr":      fmt(align="center", valign="vcenter", bg_color="#FFFFFF"),
+        "ctr_alt":  fmt(align="center", valign="vcenter", bg_color="#F2F2F2"),
+    }
 
     def _iv_label(iv):
         if iv < 0.02: return "Useless"
@@ -183,67 +195,48 @@ def generate_woe_excel(binning_results: dict, outcome_col: str = "target") -> by
         if iv < 0.5:  return "Strong"
         return "Suspicious"
 
-    def _iv_color(iv):
-        if iv < 0.02: return "FFD9D9D9"
-        if iv < 0.1:  return "FFFFD966"
-        if iv < 0.3:  return "FF70AD47"
-        if iv < 0.5:  return "FF4472C4"
-        return "FFFF0000"
-
-    # ── Build workbook (data + layout only, no charts yet) ────────────
-    wb  = Workbook()
-    wb.remove(wb.active)
-
-    # Track per-sheet chart metadata for XML injection later
-    # { sheet_name: { n_bins, count_col, er_col, data_start_row } }
-    chart_meta = {}
-
-    # ── Summary sheet ─────────────────────────────────────────────────
-    ws_sum = wb.create_sheet("Summary")
-    ws_sum.sheet_view.showGridLines = False
-
-    ws_sum.merge_cells("A1:F1")
-    c = ws_sum["A1"]
-    c.value     = "WoE Binning Summary"
-    c.font      = Font(name="Arial", bold=True, size=14, color="FF1F3864")
-    c.alignment = Alignment(horizontal="left", vertical="center")
-    c.fill      = _wht()
-    ws_sum.row_dimensions[1].height = 28
-
-    ws_sum.merge_cells("A2:F2")
-    c = ws_sum["A2"]
-    c.value = f"Outcome variable: {outcome_col}"
-    c.font  = Font(name="Arial", size=10, color="FF666666", italic=True)
-    c.fill  = _wht()
-    ws_sum.row_dimensions[2].height = 16
-
-    hdrs = ["Feature", "Type", "Mode", "Bins", "Total IV", "IV Strength"]
-    for ci, h in enumerate(hdrs, 1):
-        c = ws_sum.cell(row=4, column=ci, value=h)
-        sc(c, bold=True, fill=_hdr(), fc="FFFFFFFF", align="center")
-    ws_sum.row_dimensions[4].height = 18
+    def _iv_bg(iv):
+        if iv < 0.02: return "#D9D9D9"
+        if iv < 0.1:  return "#FFD966"
+        if iv < 0.3:  return "#70AD47"
+        if iv < 0.5:  return "#4472C4"
+        return "#FF0000"
 
     ranked = sorted(binning_results.items(),
                     key=lambda x: x[1].get("total_iv", 0), reverse=True)
 
-    for ri, (col, info) in enumerate(ranked, 5):
-        iv  = info.get("total_iv", 0)
-        row = [col, info["type"], info.get("bin_mode",""), len(info["bins"]), iv, _iv_label(iv)]
-        alt = ri % 2 == 0
-        for ci, val in enumerate(row, 1):
-            c = ws_sum.cell(row=ri, column=ci, value=val)
-            sc(c, fill=_alt() if alt else _wht(),
-               align="center" if ci > 1 else "left")
-            if ci == 5: c.number_format = "0.0000"
-            if ci == 6:
-                c.fill = PatternFill("solid", fgColor=_iv_color(iv))
-                c.font = Font(name="Arial", size=10, bold=True,
-                              color="FFFFFFFF" if iv >= 0.1 else "FF000000")
-        ws_sum.row_dimensions[ri].height = 16
+    # ── Summary sheet ─────────────────────────────────────────────────
+    ws = wb.add_worksheet("Summary")
+    ws.hide_gridlines(2)
+    ws.set_column(0, 0, 24); ws.set_column(1, 1, 13); ws.set_column(2, 2, 13)
+    ws.set_column(3, 3, 8);  ws.set_column(4, 4, 12); ws.set_column(5, 5, 14)
 
-    for ci, w in zip("ABCDEF", [24,13,13,8,12,14]):
-        ws_sum.column_dimensions[ci].width = w
-    ws_sum.freeze_panes = "A5"
+    ws.set_row(0, 28); ws.merge_range("A1:F1", "WoE Binning Summary", F["title"])
+    ws.set_row(1, 16)
+    ws.merge_range("A2:F2", f"Outcome variable: {outcome_col}", F["subtitle"])
+    ws.set_row(3, 18)
+    for ci, h in enumerate(["Feature","Type","Mode","Bins","Total IV","IV Strength"]):
+        ws.write(3, ci, h, F["hdr"])
+
+    ws.freeze_panes(4, 0)
+
+    for ri, (col, info) in enumerate(ranked, 4):
+        iv   = info.get("total_iv", 0)
+        alt  = ri % 2 == 0
+        bg   = "#F2F2F2" if alt else "#FFFFFF"
+        lf   = fmt(align="left",   valign="vcenter", bg_color=bg)
+        cf   = fmt(align="center", valign="vcenter", bg_color=bg)
+        nf   = fmt(align="center", valign="vcenter", bg_color=bg, num_format="0.0000")
+        ivf  = fmt(bold=True, align="center", valign="vcenter",
+                   bg_color=_iv_bg(iv),
+                   font_color="#FFFFFF" if iv >= 0.1 else "#000000")
+        ws.set_row(ri, 16)
+        ws.write(ri, 0, col,                       lf)
+        ws.write(ri, 1, info["type"],               cf)
+        ws.write(ri, 2, info.get("bin_mode",""),    cf)
+        ws.write(ri, 3, len(info["bins"]),          cf)
+        ws.write(ri, 4, iv,                         nf)
+        ws.write(ri, 5, _iv_label(iv),              ivf)
 
     # ── One sheet per column ──────────────────────────────────────────
     for col, info in ranked:
@@ -255,315 +248,176 @@ def generate_woe_excel(binning_results: dict, outcome_col: str = "target") -> by
         n_bins   = len(bins)
         sname    = col[:31]
 
-        ws = wb.create_sheet(sname)
-        ws.sheet_view.showGridLines = False
+        ws = wb.add_worksheet(sname)
+        ws.hide_gridlines(2)
+        ws.freeze_panes(4, 0)
 
-        # Title
-        ws.merge_cells("A1:J1")
-        c = ws["A1"]
-        c.value     = col
-        c.font      = Font(name="Arial", bold=True, size=13, color="FF1F3864")
-        c.alignment = Alignment(horizontal="left", vertical="center")
-        c.fill      = _wht()
-        ws.row_dimensions[1].height = 24
+        ws.set_column(0, 0, 4)   # #
+        ws.set_column(1, 1, 26)  # Bin
+        ws.set_column(2, 2, 10)  # N
+        ws.set_column(3, 3, 10)  # Events
+        ws.set_column(4, 4, 12)  # Non-Events
+        ws.set_column(5, 5, 12)  # Event Rate
+        ws.set_column(6, 6, 10)  # WoE
+        ws.set_column(7, 7, 10)  # IV
+        ws.set_column(8, 8, 10)  # Cum IV
 
-        ws.merge_cells("A2:J2")
-        c = ws["A2"]
-        c.value = (f"Type: {col_type}   |   Mode: {bin_mode}   |   "
-                   f"Total IV: {total_iv:.6f}   |   {_iv_label(total_iv)}")
-        c.font      = Font(name="Arial", size=9, italic=True, color="FF666666")
-        c.fill      = _wht()
-        ws.row_dimensions[2].height = 14
-        ws.row_dimensions[3].height = 6
+        # Title rows
+        ws.set_row(0, 24)
+        ws.merge_range(0, 0, 0, 9, col, F["title"])
+        ws.set_row(1, 14)
+        ws.merge_range(1, 0, 1, 9,
+            f"Type: {col_type}   |   Mode: {bin_mode}   |   "
+            f"Total IV: {total_iv:.6f}   |   {_iv_label(total_iv)}",
+            F["subtitle"])
+        ws.set_row(2, 6)   # spacer
 
-        # Table headers row 4
-        t_hdrs = ["#","Bin / Category","N","Events","Non-Events",
-                  "Event Rate","WoE","IV","Cum. IV"]
-        for ci, h in enumerate(t_hdrs, 1):
-            c = ws.cell(row=4, column=ci, value=h)
-            sc(c, bold=True, fill=_hdr(), fc="FFFFFFFF", align="center")
-        ws.row_dimensions[4].height = 18
+        # Header row (row index 3 = Excel row 4)
+        ws.set_row(3, 18)
+        for ci, h in enumerate(["#","Bin / Category","N","Events","Non-Events",
+                                  "Event Rate","WoE","IV","Cum. IV"]):
+            ws.write(3, ci, h, F["hdr"])
 
-        # Data rows start at row 5
-        DATA_START = 5
+        # Data rows start at row index 4 = Excel row 5
+        DATA_START = 4
         cum_iv = 0.0
-        for ri, b in enumerate(bins, DATA_START):
-            cum_iv += b.get("iv", 0)
-            lo, hi  = b.get("min",""), b.get("max","")
-            label   = (f"[{lo:.4g}, {hi:.4g}]"
-                       if is_num and isinstance(lo, float)
-                       else b.get("label", str(lo)))
-            row_data = [
-                ri - DATA_START + 1, label,
-                b.get("n",0), b.get("events",0), b.get("non_events",0),
-                b.get("event_rate",0), b.get("woe",0), b.get("iv",0), cum_iv,
-            ]
+        labels, counts, event_rates = [], [], []
+
+        for ri, b in enumerate(bins):
+            row = DATA_START + ri
             alt = ri % 2 == 0
-            for ci, val in enumerate(row_data, 1):
-                c = ws.cell(row=ri, column=ci, value=val)
-                sc(c, fill=_alt() if alt else _wht(),
-                   align="right" if ci > 2 else ("center" if ci == 1 else "left"))
-                if ci == 6: c.number_format = "0.00%"
-                if ci in (7,8,9): c.number_format = "0.00000"
-                if ci in (3,4,5): c.number_format = "#,##0"
-            ws.row_dimensions[ri].height = 15
+            lf  = F["lbl_alt"]  if alt else F["lbl"]
+            nf  = F["num_alt"]  if alt else F["num"]
+            pf  = F["pct_alt"]  if alt else F["pct"]
+            wf  = F["woe_alt"]  if alt else F["woe"]
+            cf  = F["ctr_alt"]  if alt else F["ctr"]
 
-        last_data = DATA_START + n_bins - 1
-        total_row = last_data + 1
-        totals = {1:"Total", 3:f"=SUM(C{DATA_START}:C{last_data})",
-                  4:f"=SUM(D{DATA_START}:D{last_data})",
-                  5:f"=SUM(E{DATA_START}:E{last_data})",
-                  8:f"=SUM(H{DATA_START}:H{last_data})"}
-        for ci in range(1, 10):
-            c = ws.cell(row=total_row, column=ci, value=totals.get(ci,""))
-            sc(c, bold=True, fill=PatternFill("solid", fgColor="FFE2EFDA"),
-               align="right")
-            if ci == 3: c.number_format = "#,##0"
-            if ci == 8: c.number_format = "0.00000"
+            cum_iv += b.get("iv", 0)
+            lo, hi = b.get("min",""), b.get("max","")
+            label  = (f"[{lo:.4g}, {hi:.4g}]"
+                      if is_num and isinstance(lo, float)
+                      else b.get("label", str(lo)))
 
-        for ci, w in enumerate([4,26,10,10,12,12,10,10,10], 1):
-            ws.column_dimensions[get_column_letter(ci)].width = w
+            labels.append(label)
+            counts.append(b.get("n", 0))
+            event_rates.append(b.get("event_rate", 0))
 
-        ws.freeze_panes = "A5"
+            ws.set_row(row, 15)
+            ws.write(row, 0, ri + 1,             cf)
+            ws.write(row, 1, label,               lf)
+            ws.write(row, 2, b.get("n",0),        nf)
+            ws.write(row, 3, b.get("events",0),   nf)
+            ws.write(row, 4, b.get("non_events",0), nf)
+            ws.write(row, 5, b.get("event_rate",0), pf)
+            ws.write(row, 6, b.get("woe",0),      wf)
+            ws.write(row, 7, b.get("iv",0),       wf)
+            ws.write(row, 8, cum_iv,               wf)
 
-        # Ensure sheet rels file exists (openpyxl omits it when no rels present)
-        sheet_rels_path = f"xl/worksheets/_rels/sheet{len(chart_meta)+2}.xml.rels"
-        # Will be written per-sheet after idx is known
+        # Totals row
+        last_data = DATA_START + n_bins   # 0-indexed row after last bin
+        ws.set_row(last_data, 15)
+        ws.write    (last_data, 0, "Total",  F["tot"])
+        ws.write    (last_data, 1, "",       F["tot"])
+        ws.write_formula(last_data, 2, f"=SUM(C{DATA_START+1}:C{last_data})", F["tot"])
+        ws.write_formula(last_data, 3, f"=SUM(D{DATA_START+1}:D{last_data})", F["tot"])
+        ws.write_formula(last_data, 4, f"=SUM(E{DATA_START+1}:E{last_data})", F["tot"])
+        ws.write    (last_data, 5, "",       F["tot"])
+        ws.write    (last_data, 6, "",       F["tot"])
+        ws.write_formula(last_data, 7, f"=SUM(H{DATA_START+1}:H{last_data})", F["tot_woe"])
+        ws.write    (last_data, 8, "",       F["tot"])
 
-        # Store chart metadata — chart goes in col K (11), row 4
-        # count = col C (3), event_rate = col F (6)
-        chart_meta[sname] = {
-            "n_bins":        n_bins,
-            "count_col":     3,   # C
-            "er_col":        6,   # F
-            "data_start_row": DATA_START,
-            "anchor_col":    10,  # K (0-indexed)
-            "anchor_row":    3,   # row 4 (0-indexed)
-        }
+        # ── Combo chart — xlsxwriter handles secondary axis correctly ──
+        bar = wb.add_chart({"type": "column"})
+        bar.add_series({
+            "name":       "Count",
+            "categories": [sname, DATA_START, 1, DATA_START + n_bins - 1, 1],
+            "values":     [sname, DATA_START, 2, DATA_START + n_bins - 1, 2],
+            "fill":       {"color": "#4472C4"},
+            "border":     {"color": "#4472C4"},
+            "gap":        80,
+        })
 
-    # ── Save workbook to bytes ────────────────────────────────────────
-    buf = io.BytesIO()
-    wb.save(buf)
-    raw = buf.getvalue()
+        line = wb.add_chart({"type": "line"})
+        line.add_series({
+            "name":       "Event Rate",
+            "categories": [sname, DATA_START, 1, DATA_START + n_bins - 1, 1],
+            "values":     [sname, DATA_START, 5, DATA_START + n_bins - 1, 5],
+            "line":       {"color": "#FF0000", "width": 2.0},
+            "marker":     {"type": "circle", "size": 5,
+                           "fill":   {"color": "#FF0000"},
+                           "border": {"color": "#FF0000"}},
+            "y2_axis":    True,
+        })
 
-    # ── Inject combo chart XML into each column sheet ─────────────────
-    def make_chart_xml(sheet_name, meta):
-        n    = meta["n_bins"]
-        ccol = get_column_letter(meta["count_col"])
-        ecol = get_column_letter(meta["er_col"])
-        r1   = meta["data_start_row"]
-        r2   = r1 + n - 1
-        sn   = sheet_name.replace("'", "\'")
+        # set_y_axis on bar (left), set_y2_axis on line (right) — xlsxwriter requirement
+        bar.set_y_axis({"name": "Count", "major_gridlines": {"visible": True}})
+        bar.set_x_axis({"text_axis": True})
+        line.set_y2_axis({"name": "Event Rate %", "num_format": "0.0%"})
 
-        label_ref = f"\'{sn}\'!$B${r1}:$B${r2}"
-        count_ref = f"\'{sn}\'!${ccol}${r1}:${ccol}${r2}"
-        er_ref    = f"\'{sn}\'!${ecol}${r1}:${ecol}${r2}"
+        bar.combine(line)
+        bar.set_size({"width": 680, "height": 420})
+        bar.set_chartarea({"border": {"color": "#D9D9D9"}, "fill": {"color": "#FFFFFF"}})
+        bar.set_plotarea({"fill": {"color": "#FFFFFF"}})
+        bar.set_legend({"position": "bottom"})
 
-        # Unescaped for XML content
-        lr = f"'{sn}'!$B${r1}:$B${r2}"
-        cr = f"'{sn}'!${ccol}${r1}:${ccol}${r2}"
-        er = f"'{sn}'!${ecol}${r1}:${ecol}${r2}"
+        # Place chart at column K (index 10), row 4 (index 3)
+        ws.insert_chart(3, 10, bar, {"x_offset": 0, "y_offset": 0})
 
-        return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
-              xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
-              xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <c:chart>
-    <c:plotArea>
-      <c:barChart>
-        <c:barDir val="col"/>
-        <c:grouping val="clustered"/>
-        <c:ser>
-          <c:idx val="0"/><c:order val="0"/>
-          <c:tx><c:v>Count</c:v></c:tx>
-          <c:spPr>
-            <a:solidFill><a:srgbClr val="4472C4"/></a:solidFill>
-            <a:ln><a:solidFill><a:srgbClr val="4472C4"/></a:solidFill></a:ln>
-          </c:spPr>
-          <c:cat><c:strRef><c:f>{lr}</c:f></c:strRef></c:cat>
-          <c:val><c:numRef><c:f>{cr}</c:f></c:numRef></c:val>
-        </c:ser>
-        <c:gapWidth val="80"/>
-        <c:axId val="1"/><c:axId val="2"/>
-      </c:barChart>
-      <c:lineChart>
-        <c:grouping val="standard"/>
-        <c:ser>
-          <c:idx val="1"/><c:order val="1"/>
-          <c:tx><c:v>Event Rate</c:v></c:tx>
-          <c:spPr>
-            <a:ln w="25400"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:ln>
-          </c:spPr>
-          <c:marker>
-            <c:symbol val="circle"/><c:size val="5"/>
-            <c:spPr><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></c:spPr>
-          </c:marker>
-          <c:cat><c:strRef><c:f>{lr}</c:f></c:strRef></c:cat>
-          <c:val><c:numRef><c:f>{er}</c:f></c:numRef></c:val>
-          <c:smooth val="0"/>
-        </c:ser>
-        <c:axId val="1"/><c:axId val="3"/>
-      </c:lineChart>
-      <c:catAx>
-        <c:axId val="1"/>
-        <c:scaling><c:orientation val="minMax"/></c:scaling>
-        <c:axPos val="b"/>
-        <c:tickLblPos val="low"/>
-        <c:crossAx val="2"/>
-      </c:catAx>
-      <c:valAx>
-        <c:axId val="2"/>
-        <c:scaling><c:orientation val="minMax"/></c:scaling>
-        <c:axPos val="l"/>
-        <c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/>
-          <a:p><a:r><a:rPr lang="en-US"/><a:t>Count</a:t></a:r></a:p>
-        </c:rich></c:tx><c:overlay val="0"/></c:title>
-        <c:crossAx val="1"/>
-      </c:valAx>
-      <c:valAx>
-        <c:axId val="3"/>
-        <c:scaling><c:orientation val="minMax"/></c:scaling>
-        <c:axPos val="r"/>
-        <c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/>
-          <a:p><a:r><a:rPr lang="en-US"/><a:t>Event Rate</a:t></a:r></a:p>
-        </c:rich></c:tx><c:overlay val="0"/></c:title>
-        <c:numFmt formatCode="0.0%" sourceLinked="0"/>
-        <c:crossAx val="1"/>
-        <c:crosses val="max"/>
-      </c:valAx>
-    </c:plotArea>
-    <c:plotVisOnly val="1"/>
-  </c:chart>
-  <c:spPr>
-    <a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill>
-    <a:ln><a:solidFill><a:srgbClr val="D9D9D9"/></a:solidFill></a:ln>
-  </c:spPr>
-</c:chartSpace>""".encode("utf-8")
+    wb.close()
+    buf.seek(0)
+    return buf.read()
 
-    def make_drawing_xml(anchor_col, anchor_row, chart_rel_id="rId1"):
-        """Minimal drawing XML that places the chart at the given cell."""
-        # Chart size: 18cm x 11cm in EMU (1cm = 914400/2.54 EMU)
-        cx = int(18 * 914400 / 2.54)
-        cy = int(11 * 914400 / 2.54)
-        return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
-          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
-          xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <xdr:oneCellAnchor>
-    <xdr:from><xdr:col>{anchor_col}</xdr:col><xdr:colOff>0</xdr:colOff>
-              <xdr:row>{anchor_row}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
-    <xdr:ext cx="{cx}" cy="{cy}"/>
-    <xdr:graphicFrame macro="">
-      <xdr:nvGraphicFramePr>
-        <xdr:cNvPr id="2" name="Chart 1"/>
-        <xdr:cNvGraphicFramePr/>
-      </xdr:nvGraphicFramePr>
-      <xdr:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></xdr:xfrm>
-      <a:graphic>
-        <a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">
-          <c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
-                   r:id="{chart_rel_id}"/>
-        </a:graphicData>
-      </a:graphic>
-    </xdr:graphicFrame>
-    <xdr:clientData/>
-  </xdr:oneCellAnchor>
-</xdr:wsDr>""".encode("utf-8")
 
-    def make_drawing_rels_xml(chart_path):
-        return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1"
-    Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart"
-    Target="{chart_path}"/>
-</Relationships>""".encode("utf-8")
+def generate_apps_script(binning_results: dict) -> str:
+    """
+    Generate a Google Apps Script that fixes all combo charts in the workbook
+    so the Event Rate line uses the RIGHT / secondary Y axis.
 
-    # Patch the zip
-    in_zip  = zipfile.ZipFile(io.BytesIO(raw), "r")
-    out_buf = io.BytesIO()
-    out_zip = zipfile.ZipFile(out_buf, "w", zipfile.ZIP_DEFLATED)
+    Usage:
+      1. Open the exported .xlsx in Google Sheets
+      2. Extensions → Apps Script
+      3. Paste this script and click Run
+    """
+    # Collect sheet names that have charts (all column sheets, not Summary)
+    col_sheets = [col[:31] for col in binning_results.keys()]
 
-    # Map sheet name → sheet index (1-based) from workbook.xml
-    import re
-    wb_xml = in_zip.read("xl/workbook.xml").decode()
-    sheet_order = re.findall(r'name="([^"]+)"', wb_xml)
-    sheet_idx   = {name: i+1 for i, name in enumerate(sheet_order)}
+    lines = [
+        "/**",
+        " * Fix WoE combo charts: move Event Rate series to secondary (right) Y axis.",
+        " * Run once after opening the exported .xlsx in Google Sheets.",
+        " * Extensions → Apps Script → paste → Run",
+        " */",
+        "function fixSecondaryAxis() {",
+        "  var ss = SpreadsheetApp.getActiveSpreadsheet();",
+        f"  var sheetNames = {col_sheets!r};",
+        "",
+        "  sheetNames.forEach(function(name) {",
+        "    var sheet = ss.getSheetByName(name);",
+        "    if (!sheet) { Logger.log('Sheet not found: ' + name); return; }",
+        "",
+        "    var charts = sheet.getCharts();",
+        "    if (charts.length === 0) { Logger.log('No chart in: ' + name); return; }",
+        "",
+        "    var chart = charts[0];",
+        "    var builder = chart.modify();",
+        "",
+        "    // Series 0 = Count bars  → LEFT axis",
+        "    // Series 1 = Event Rate  → RIGHT axis",
+        "    builder.setSeriesOptions(0, {targetAxisIndex: 0});",
+        "    builder.setSeriesOptions(1, {targetAxisIndex: 1});",
+        "",
+        "    // Label the axes",
+        "    builder.setOption('vAxes', {",
+        "      0: {title: 'Count'},",
+        "      1: {title: 'Event Rate %', format: '0.0%'}",
+        "    });",
+        "",
+        "    sheet.updateChart(builder.build());",
+        "    Logger.log('Fixed: ' + name);",
+        "  });",
+        "",
+        "  SpreadsheetApp.getUi().alert('Done! All Event Rate lines moved to right axis.');",
+        "}",
+    ]
+    return "\n".join(lines)
 
-    # Files we will add (keyed by zip path)
-    extra_files = {}
-    # Track which [Content_Types].xml overrides to add
-    ct_overrides = []
-
-    chart_counter = 1
-    for sname, meta in chart_meta.items():
-        idx = sheet_idx.get(sname)
-        if idx is None:
-            continue
-
-        chart_path    = f"xl/charts/chart{chart_counter}.xml"
-        drawing_path  = f"xl/drawings/drawing{idx}.xml"
-        draw_rel_path = f"xl/drawings/_rels/drawing{idx}.xml.rels"
-        sheet_rel_path = f"xl/worksheets/_rels/sheet{idx}.xml.rels"
-
-        # Chart XML
-        extra_files[chart_path] = make_chart_xml(sname, meta)
-
-        # Drawing XML
-        extra_files[drawing_path] = make_drawing_xml(
-            meta["anchor_col"], meta["anchor_row"])
-
-        # Drawing rels (points drawing → chart)
-        rel_target = f"../charts/chart{chart_counter}.xml"
-        extra_files[draw_rel_path] = make_drawing_rels_xml(rel_target)
-
-        # Sheet rels — always write fresh (openpyxl omits when sheet has no rels)
-        draw_target = f"../drawings/drawing{idx}.xml"
-        extra_files[sheet_rel_path] = (
-            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
-            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
-            f'<Relationship Id="rId_draw{idx}" ' +
-            'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" ' +
-            f'Target="{draw_target}"/>' +
-            '</Relationships>'
-        ).encode("utf-8")
-
-        ct_overrides.append(
-            f'<Override PartName="/{chart_path}" ' +
-            'ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>')
-        ct_overrides.append(
-            f'<Override PartName="/{drawing_path}" ' +
-            'ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>')
-
-        chart_counter += 1
-
-    # Now rewrite all files from original zip, patching sheet rels and [Content_Types]
-    for item in in_zip.infolist():
-        data = in_zip.read(item.filename)
-
-        # Patch sheet{n}.xml to add drawing reference
-        for sname, meta in chart_meta.items():
-            idx = sheet_idx.get(sname)
-            if not idx: continue
-            if item.filename == f"xl/worksheets/sheet{idx}.xml":
-                xml_str = data.decode("utf-8")
-                draw_ref = f'<drawing r:id="rId_draw{idx}"/></worksheet>'
-                if "<drawing" not in xml_str:
-                    xml_str = xml_str.replace("</worksheet>", draw_ref)
-                data = xml_str.encode("utf-8")
-
-        # Patch [Content_Types].xml to register new parts
-        if item.filename == "[Content_Types].xml":
-            xml_str = data.decode("utf-8")
-            for override in ct_overrides:
-                if override not in xml_str:
-                    xml_str = xml_str.replace("</Types>", override + "</Types>")
-            data = xml_str.encode("utf-8")
-
-        out_zip.writestr(item, data)
-
-    # Write extra files
-    for path, data in extra_files.items():
-        out_zip.writestr(path, data)
-
-    out_zip.close()
-    return out_buf.getvalue()

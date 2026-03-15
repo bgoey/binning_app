@@ -79,6 +79,73 @@
       <button class="btn-outline" id="exportExcelBtn">Export WoE + charts (Excel)</button>
     </section>
 
+    <!-- Step 4: Model -->
+    <section class="panel" id="panel-model" style="display:none">
+      <div class="panel-head">
+        <span class="step-dot" data-step="4">4</span>
+        <span class="panel-title">Elastic Net Model</span>
+      </div>
+
+      <!-- Variable selector -->
+      <div class="config-field">
+        <label>Variables <span id="modelVarCount" style="opacity:0.5"></span></label>
+        <div style="display:flex;gap:6px;margin-bottom:6px">
+          <button class="btn-sm-tgl" onclick="selectAllModelVars(true)">All</button>
+          <button class="btn-sm-tgl" onclick="selectAllModelVars(false)">None</button>
+        </div>
+        <div id="modelVarList" class="col-assign" style="max-height:180px"></div>
+      </div>
+
+      <!-- Score scaling -->
+      <div class="config-row">
+        <div class="config-field half">
+          <label>Base score</label>
+          <input type="number" id="modelBaseScore" value="1500" min="0" max="9999">
+        </div>
+        <div class="config-field half">
+          <label>PDO</label>
+          <input type="number" id="modelPdo" value="20" min="1" max="100">
+        </div>
+      </div>
+      <div class="config-row">
+        <div class="config-field half">
+          <label>Score min</label>
+          <input type="number" id="modelScoreMin" value="1001">
+        </div>
+        <div class="config-field half">
+          <label>Score max</label>
+          <input type="number" id="modelScoreMax" value="1999">
+        </div>
+      </div>
+
+      <!-- Regularisation -->
+      <div class="config-field">
+        <label>Alpha (regularisation)</label>
+        <input type="number" id="modelAlpha" value="1.0" min="0.001" step="0.1">
+      </div>
+      <div class="config-field">
+        <label>L1 ratio (0=Ridge, 1=Lasso)</label>
+        <input type="number" id="modelL1Ratio" value="0.5" min="0" max="1" step="0.05">
+      </div>
+      <div class="config-field">
+        <label>CV folds</label>
+        <input type="number" id="modelCvFolds" value="5" min="2" max="20">
+      </div>
+
+      <!-- Auto-tune toggle -->
+      <div class="config-field" style="margin-top:2px">
+        <div class="mode-toggle" id="modelTuneToggle">
+          <button class="mode-btn active" data-tune="manual">Manual</button>
+          <button class="mode-btn" data-tune="auto">Auto-tune</button>
+        </div>
+        <div class="mode-hint" id="modelTuneHint">Use alpha and L1 ratio as set above</div>
+      </div>
+
+      <button class="btn-primary" id="modelFitBtn">Fit model →</button>
+      <button class="btn-outline" id="modelExportBtn" style="margin-top:6px">⬇ Export scorer (.py)</button>
+      <div id="modelFitStatus" style="font-size:11px;color:var(--text-3);margin-top:6px;font-family:var(--mono);min-height:14px"></div>
+    </section>
+
   </aside>
 
   <!-- ── MAIN ── -->
@@ -98,6 +165,20 @@
         <div class="col-tabs" id="colTabs"></div>
       </div>
       <div id="colContent"></div>
+    </div>
+
+    <!-- Model results area -->
+    <div id="modelArea" style="display:none">
+      <div class="results-header">
+        <div class="results-meta" id="modelMeta"></div>
+        <div class="col-tabs" id="modelTabs">
+          <div class="col-tab active" data-mtab="overview">Overview</div>
+          <div class="col-tab" data-mtab="performance">Performance table</div>
+          <div class="col-tab" data-mtab="calibration">Calibration</div>
+          <div class="col-tab" data-mtab="coefficients">Coefficients</div>
+        </div>
+      </div>
+      <div id="modelContent" style="padding:24px"></div>
     </div>
 
   </main>

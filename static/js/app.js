@@ -129,7 +129,7 @@ function showProgress(pct, completed, total, backend) {
     wrap.innerHTML = `
       <div style="display:flex;justify-content:space-between;margin-bottom:8px;font-size:11px;color:#9a9a94">
         <span id="progressLabel">Binning…</span>
-        <span id="progressPct" style="color:var(--green)">0%</span>
+        <span id="progressPct" style="color:#00A3A3">0%</span>
       </div>
       <div style="height:6px;background:rgba(255,255,255,0.07);border-radius:3px;overflow:hidden">
         <div id="progressBar" style="height:100%;width:0%;background:var(--green);border-radius:3px;transition:width 0.3s ease"></div>
@@ -247,6 +247,8 @@ function pollJob(jobId, btn) {
 
         renderResults(S.binResult);
         $("panel-export").style.display = "block";
+        $("panel-model").style.display  = "block";
+        buildModelVarList(job.results);
         markStep(3);
         btn.disabled    = false;
         btn.textContent = "Run binning →";
@@ -294,6 +296,9 @@ function renderResults(data) {
 function switchTab(col) {
   document.querySelectorAll(".col-tab").forEach(t => t.classList.toggle("active", t.dataset.col === col));
   S.activeTab = col;
+  // Show binning results, hide model area
+  $("resultsArea").style.display = "block";
+  $("modelArea").style.display   = "none";
   renderColContent(col);
 }
 
@@ -505,7 +510,7 @@ function renderLegend(col) {
   if (existing) existing.remove();
   const leg = document.createElement("div");
   leg.className = "chart-legend";
-  leg.style.cssText = "display:flex;gap:16px;margin-top:8px;font-size:10px;font-family:DM Mono,monospace;color:#5a5a56;flex-wrap:wrap";
+  leg.style.cssText = "display:flex;gap:16px;margin-top:8px;font-size:10px;font-family:DM Mono,monospace;color:#8496AC;flex-wrap:wrap";
   leg.innerHTML = `
     <span style="display:flex;align-items:center;gap:5px"><span style="width:10px;height:10px;border-radius:2px;background:rgba(200,240,96,0.4)"></span>Count</span>
     <span style="display:flex;align-items:center;gap:5px"><span style="width:16px;height:2px;background:#4d9de0;display:inline-block"></span>Event rate</span>
@@ -685,3 +690,368 @@ document.addEventListener("click", e => {
   const tab = e.target.closest(".col-tab");
   if (tab) setTimeout(() => renderLegend(tab.dataset.col), 50);
 });
+
+/* ── MODEL TAB ───────────────────────────────────────────────────── */
+
+// ── Mode toggle (manual / auto-tune) ─────────────────────────────
+document.querySelectorAll("#modelTuneToggle .mode-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll("#modelTuneToggle .mode-btn").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    $("modelTuneHint").textContent = btn.dataset.tune === "auto"
+      ? "Alpha will be found by cross-validation (slower)"
+      : "Use alpha and L1 ratio as set above";
+    $("modelAlpha").closest(".config-field").style.opacity = btn.dataset.tune === "auto" ? "0.35" : "1";
+  });
+});
+
+// ── Build variable selector after binning ─────────────────────────
+function buildModelVarList(results) {
+  const div = $("modelVarList");
+  div.innerHTML = "";
+  Object.keys(results).forEach(col => {
+    const info = results[col];
+    const row  = document.createElement("div");
+    row.className = "model-var-row";
+    row.innerHTML = `
+      <input type="checkbox" checked id="mvar_${col}" data-col="${col}">
+      <label for="mvar_${col}" style="flex:1;cursor:pointer">${col}</label>
+      <span style="font-size:10px;color:var(--text-3)">IV ${fmt(info.total_iv,4)}</span>
+    `;
+    div.appendChild(row);
+  });
+  updateModelVarCount();
+}
+
+function selectAllModelVars(checked) {
+  document.querySelectorAll("#modelVarList input[type=checkbox]").forEach(cb => cb.checked = checked);
+  updateModelVarCount();
+}
+
+function updateModelVarCount() {
+  const total   = document.querySelectorAll("#modelVarList input[type=checkbox]").length;
+  const checked = document.querySelectorAll("#modelVarList input[type=checkbox]:checked").length;
+  $("modelVarCount").textContent = `(${checked}/${total})`;
+}
+
+document.addEventListener("change", e => {
+  if (e.target.closest("#modelVarList")) updateModelVarCount();
+});
+
+// ── Fit button ────────────────────────────────────────────────────
+$("modelFitBtn").addEventListener("click", fitModel);
+
+async function fitModel() {
+  if (!S.currentJobId) { toast("Run binning first"); return; }
+
+  const selected = [...document.querySelectorAll("#modelVarList input[type=checkbox]:checked")]
+    .map(cb => cb.dataset.col);
+  if (selected.length === 0) { toast("Select at least one variable"); return; }
+
+  const autoTune = document.querySelector("#modelTuneToggle .mode-btn.active")?.dataset.tune === "auto";
+
+  const config = {
+    selected_cols: selected,
+    alpha:      parseFloat($("modelAlpha").value)    || 1.0,
+    l1_ratio:   parseFloat($("modelL1Ratio").value)  || 0.5,
+    cv_folds:   parseInt($("modelCvFolds").value)    || 5,
+    auto_tune:  autoTune,
+    base_score: parseInt($("modelBaseScore").value)  || 1500,
+    pdo:        parseInt($("modelPdo").value)        || 20,
+    score_min:  parseInt($("modelScoreMin").value)   || 1001,
+    score_max:  parseInt($("modelScoreMax").value)   || 1999,
+  };
+
+  const btn = $("modelFitBtn");
+  btn.disabled  = true;
+  btn.innerHTML = `<span class="spinner"></span> Fitting…`;
+
+  try {
+    const res  = await fetch(`${API}/api/model/fit`, {
+      method: "POST", headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ bin_job_id: S.currentJobId, config }),
+    });
+    const data = await res.json();
+    if (data.error) { toast("Model error: " + data.error, 5000); btn.disabled=false; btn.textContent="Fit model →"; return; }
+
+    pollModelJob(data.model_job_id, btn);
+  } catch(e) {
+    toast("Fit failed: " + e.message);
+    btn.disabled = false; btn.textContent = "Fit model →";
+  }
+}
+
+function pollModelJob(modelJobId, btn) {
+  const timer = setInterval(async () => {
+    try {
+      const res = await fetch(`${API}/api/model/status/${modelJobId}`);
+      const job = await res.json();
+
+      if (btn) {
+        btn.innerHTML = `<span class="spinner"></span> ${job.message || "Running…"} ${job.progress||0}%`;
+      }
+
+      if (job.status === "error") {
+        clearInterval(timer);
+        toast("Model failed: " + (job.error||"").split("\n")[0], 6000);
+        if(btn){ btn.disabled=false; btn.textContent="Fit model →"; }
+        return;
+      }
+
+      if (job.status === "done") {
+        clearInterval(timer);
+        if(btn){ btn.disabled=false; btn.textContent="Fit model →"; }
+        renderModelResults(job.result);
+        toast(`Model fitted — Gini ${job.result.gini.toFixed(1)}%  KS ${job.result.ks.toFixed(1)}%`);
+      }
+    } catch(e) { console.warn("Model poll error:", e); }
+  }, 800);
+}
+
+// ── Render model results ──────────────────────────────────────────
+let _modelCharts = {};
+
+function renderModelResults(r) {
+  $("resultsArea").style.display   = "none";
+  $("modelArea").style.display     = "block";
+
+  // Meta bar
+  $("modelMeta").innerHTML = `
+    <div class="meta-item">Gini (in-sample)<strong style="color:var(--accent)">${r.gini.toFixed(1)}%</strong></div>
+    <div class="meta-item">CV Gini<strong>${r.cv_gini_mean.toFixed(1)}% ±${r.cv_gini_std.toFixed(1)}</strong></div>
+    <div class="meta-item">KS<strong>${r.ks.toFixed(1)}%</strong></div>
+    <div class="meta-item">Variables in model<strong>${r.n_in_model}/${r.selected_cols.length}</strong></div>
+    <div class="meta-item">Records<strong>${fmtN(r.n_records)}</strong></div>
+    <div class="meta-item">Score range<strong>${r.score_min}–${r.score_max}</strong></div>
+    <div class="meta-item">PDO<strong>${r.pdo}</strong></div>
+  `;
+
+  // Wire model sub-tabs
+  document.querySelectorAll("#modelTabs .col-tab").forEach(t => {
+    t.onclick = () => {
+      document.querySelectorAll("#modelTabs .col-tab").forEach(x => x.classList.remove("active"));
+      t.classList.add("active");
+      renderModelTab(t.dataset.mtab, r);
+    };
+  });
+
+  renderModelTab("overview", r);
+}
+
+function renderModelTab(tab, r) {
+  // Destroy old charts
+  Object.values(_modelCharts).forEach(c => c && c.destroy && c.destroy());
+  _modelCharts = {};
+
+  const el = $("modelContent");
+
+  if (tab === "overview")     renderModelOverview(el, r);
+  if (tab === "performance")  renderModelPerf(el, r);
+  if (tab === "calibration")  renderModelCalib(el, r);
+  if (tab === "coefficients") renderModelCoef(el, r);
+}
+
+// ── Overview: metric cards + ROC + KS ────────────────────────────
+function renderModelOverview(el, r) {
+  el.innerHTML = `
+    <div class="model-cards">
+      <div class="model-card">
+        <div class="model-card-label">Gini (in-sample)</div>
+        <div class="model-card-value">${r.gini.toFixed(1)}%</div>
+        <div class="model-card-sub">AUC = ${((r.gini/100+1)/2).toFixed(4)}</div>
+      </div>
+      <div class="model-card">
+        <div class="model-card-label">CV Gini (${r.cv_folds}-fold)</div>
+        <div class="model-card-value">${r.cv_gini_mean.toFixed(1)}%</div>
+        <div class="model-card-sub">±${r.cv_gini_std.toFixed(1)}%
+          <div class="fold-badges">${r.cv_gini_folds.map(g=>`<span class="fold-badge">${g}%</span>`).join("")}</div>
+        </div>
+      </div>
+      <div class="model-card">
+        <div class="model-card-label">KS Statistic</div>
+        <div class="model-card-value">${r.ks.toFixed(1)}%</div>
+        <div class="model-card-sub">CV KS ${r.cv_ks_mean.toFixed(1)}%</div>
+      </div>
+      <div class="model-card">
+        <div class="model-card-label">Regularisation</div>
+        <div class="model-card-value" style="font-size:14px">${r.cv_results.method}</div>
+        <div class="model-card-sub">α=${r.cv_results.best_alpha.toFixed(4)}  L1=${r.cv_results.l1_ratio}</div>
+      </div>
+    </div>
+    <div class="model-chart-grid">
+      <div class="model-chart-card">
+        <div class="model-chart-title">ROC Curve (Gini = ${r.gini.toFixed(1)}%)</div>
+        <div class="model-chart-wrap"><canvas id="chartRoc"></canvas></div>
+      </div>
+      <div class="model-chart-card">
+        <div class="model-chart-title">Cumulative Event Capture (KS = ${r.ks.toFixed(1)}%)</div>
+        <div class="model-chart-wrap"><canvas id="chartKs"></canvas></div>
+      </div>
+    </div>
+  `;
+
+  // ROC chart
+  const fpr = r.roc_curve.fpr;
+  const tpr = r.roc_curve.tpr;
+  _modelCharts.roc = new Chart($("chartRoc"), {
+    type: "line",
+    data: {
+      labels: fpr.map(v => v.toFixed(3)),
+      datasets: [
+        { label: "ROC", data: tpr, borderColor: "#FFFFFF", borderWidth: 2,
+          pointRadius: 0, fill: false, tension: 0 },
+        { label: "Random", data: fpr, borderColor: "rgba(255,255,255,0.35)", borderWidth: 1,
+          borderDash: [4,4], pointRadius: 0, fill: false, tension: 0 },
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: true, labels: { color: "#FFFFFF", font: { size: 11 } } } },
+      scales: {
+        x: { title: { display: true, text: "False Positive Rate", color: "#FFFFFF" },
+             ticks: { color: "#FFFFFF", maxTicksLimit: 6 }, grid: { color: "rgba(255,255,255,0.12)" } },
+        y: { title: { display: true, text: "True Positive Rate", color: "#FFFFFF" },
+             ticks: { color: "#FFFFFF" }, grid: { color: "rgba(255,255,255,0.12)" } },
+      }
+    }
+  });
+
+  // KS / Cumulative capture chart
+  const bands = r.perf_table;
+  const pctPop    = bands.map(b => b.pct_of_total * 100);
+  const pctEvents = bands.map(b => b.pct_events_captured * 100);
+  const random    = bands.map(b => b.pct_of_total * 100);
+  _modelCharts.ks = new Chart($("chartKs"), {
+    type: "line",
+    data: {
+      labels: pctPop.map(v => v.toFixed(0) + "%"),
+      datasets: [
+        { label: "Model", data: pctEvents, borderColor: "#FFFFFF", borderWidth: 2,
+          pointRadius: 0, fill: false, tension: 0 },
+        { label: "Random", data: random, borderColor: "rgba(255,255,255,0.35)", borderWidth: 1,
+          borderDash: [4,4], pointRadius: 0, fill: false, tension: 0 },
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: true, labels: { color: "#FFFFFF", font: { size: 11 } } } },
+      scales: {
+        x: { title: { display: true, text: "% Population (high score first)", color: "#FFFFFF" },
+             ticks: { color: "#FFFFFF", maxTicksLimit: 6 }, grid: { color: "rgba(255,255,255,0.12)" } },
+        y: { title: { display: true, text: "% Events Captured", color: "#FFFFFF" },
+             ticks: { color: "#FFFFFF" }, grid: { color: "rgba(255,255,255,0.12)" } },
+      }
+    }
+  });
+}
+
+// ── Performance table ─────────────────────────────────────────────
+function renderModelPerf(el, r) {
+  const rows = r.perf_table.map((b, i) => `
+    <tr>
+      <td>${b.band}</td>
+      <td>${b.score_from}</td>
+      <td>${b.score_to}</td>
+      <td>${fmtN(b.n)}</td>
+      <td>${fmtN(b.events)}</td>
+      <td>${fmtPct(b.event_rate)}</td>
+      <td>${fmtN(b.cum_n)}</td>
+      <td>${fmtN(b.cum_events)}</td>
+      <td>${fmtPct(b.cum_event_rate)}</td>
+      <td>${fmtPct(b.pct_of_total)}</td>
+      <td>${fmtPct(b.pct_events_captured)}</td>
+    </tr>`).join("");
+
+  el.innerHTML = `
+    <div style="overflow-x:auto">
+      <table class="perf-table">
+        <thead><tr>
+          <th>Band</th><th>Score from</th><th>Score to</th>
+          <th>N</th><th>Events</th><th>Event rate</th>
+          <th>Cum. N</th><th>Cum. events</th><th>Cum. event rate</th>
+          <th>% Population</th><th>% Events captured</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+// ── Calibration ───────────────────────────────────────────────────
+function renderModelCalib(el, r) {
+  el.innerHTML = `
+    <div class="model-chart-grid">
+      <div class="model-chart-card" style="grid-column:1/-1">
+        <div class="model-chart-title">Calibration — Predicted vs Actual bad rate</div>
+        <div class="model-chart-wrap" style="height:320px"><canvas id="chartCalib"></canvas></div>
+      </div>
+    </div>`;
+
+  const c = r.calibration;
+  _modelCharts.calib = new Chart($("chartCalib"), {
+    type: "scatter",
+    data: {
+      datasets: [
+        { label: "Bins", data: c.map(b => ({ x: b.pred_rate, y: b.actual_rate, r: Math.sqrt(b.n)/4 })),
+          backgroundColor: "rgba(255,255,255,0.7)", borderColor: "#FFFFFF", borderWidth: 1,
+          pointRadius: c.map(b => Math.max(4, Math.sqrt(b.n)/3)) },
+        { label: "Perfect calibration",
+          data: [{ x: 0, y: 0 }, { x: 1, y: 1 }],
+          type: "line", borderColor: "rgba(255,255,255,0.35)", borderWidth: 1, borderDash: [4,4],
+          pointRadius: 0, fill: false },
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { labels: { color: "#FFFFFF", font: { size: 11 } } },
+        tooltip: { callbacks: { label: ctx => {
+          if (ctx.datasetIndex === 0) {
+            const b = c[ctx.dataIndex];
+            return ` Predicted: ${fmtPct(b.pred_rate)}  Actual: ${fmtPct(b.actual_rate)}  N: ${fmtN(b.n)}`;
+          }
+        }}}
+      },
+      scales: {
+        x: { title: { display: true, text: "Predicted bad rate", color: "#FFFFFF" },
+             ticks: { color: "#FFFFFF", callback: v => fmtPct(v) },
+             grid: { color: "rgba(255,255,255,0.12)" } },
+        y: { title: { display: true, text: "Actual bad rate", color: "#FFFFFF" },
+             ticks: { color: "#FFFFFF", callback: v => fmtPct(v) },
+             grid: { color: "rgba(255,255,255,0.12)" } },
+      }
+    }
+  });
+}
+
+// ── Coefficients ──────────────────────────────────────────────────
+function renderModelCoef(el, r) {
+  const maxAbs = Math.max(...r.coefficients.map(c => Math.abs(c.coefficient)));
+  const rows = r.coefficients.map(c => {
+    const barW   = maxAbs > 0 ? Math.round(Math.abs(c.coefficient) / maxAbs * 80) : 0;
+    const cls    = !c.in_model ? "coef-zero" : c.coefficient > 0 ? "coef-pos" : "coef-neg";
+    const barCol = c.coefficient > 0 ? "var(--blue)" : "var(--red)";
+    return `<tr>
+      <td style="font-family:var(--mono)">${c.variable}</td>
+      <td class="${cls}">${c.coefficient > 0 ? "+" : ""}${c.coefficient.toFixed(5)}</td>
+      <td>
+        <div class="coef-bar-wrap">
+          <div class="coef-bar-fill" style="width:${barW}%;background:${barCol}"></div>
+        </div>
+      </td>
+      <td style="color:${c.in_model ? 'var(--accent)' : 'var(--text-3)'}">
+        ${c.in_model ? "✓ In model" : "✗ Zeroed out"}
+      </td>
+    </tr>`;
+  }).join("");
+
+  el.innerHTML = `
+    <p style="font-size:11px;color:var(--text-3);margin-bottom:12px">
+      ${r.n_in_model} of ${r.selected_cols.length} variables have non-zero coefficients.
+      Positive coefficient = higher WoE → higher predicted probability.
+    </p>
+    <div style="overflow-x:auto">
+      <table class="coef-table">
+        <thead><tr><th>Variable</th><th>Coefficient</th><th>Magnitude</th><th>Status</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}

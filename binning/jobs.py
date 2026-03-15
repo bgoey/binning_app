@@ -278,6 +278,15 @@ def start_binning_job(file_bytes: bytes,
             te         = int(np.nansum(target_arr))
             tne        = int(np.sum(~np.isnan(target_arr))) - te
 
+            # Cache full DataFrame for model step (WoE transform needs raw values)
+            import pandas as _pd
+            if filename.lower().endswith(".csv"):
+                _df_full = _pd.read_csv(io.BytesIO(file_bytes))
+            else:
+                _df_full = _pd.read_excel(io.BytesIO(file_bytes))
+            with _LOCK:
+                _JOBS[job_id]["_df"] = _df_full
+
             # Build work list: (col, type)
             work = (
                 [(c, "numeric")     for c in numeric_cols if c in columns] +
@@ -334,3 +343,104 @@ def upload_and_profile(file_bytes: bytes, filename: str) -> dict:
         "columns": col_info,
         "preview": preview_df.fillna("").astype(str).to_dict(orient="records"),
     }
+
+
+# ────────────────────────────────────────────────────────────────────
+# MODEL JOB
+# ────────────────────────────────────────────────────────────────────
+
+_MODEL_JOBS: dict[str, dict] = {}
+_MODEL_LOCK = threading.Lock()
+
+
+def _new_model_job() -> str:
+    job_id = str(uuid.uuid4())
+    with _MODEL_LOCK:
+        _MODEL_JOBS[job_id] = {
+            "id":       job_id,
+            "status":   "running",
+            "progress": 0,
+            "message":  "Starting…",
+            "result":   None,
+            "error":    None,
+        }
+    return job_id
+
+
+def get_model_job(job_id: str) -> dict | None:
+    with _MODEL_LOCK:
+        job = _MODEL_JOBS.get(job_id)
+        if job is None:
+            return None
+        return {
+            "id":       job["id"],
+            "status":   job["status"],
+            "progress": job["progress"],
+            "message":  job["message"],
+            "result":   job["result"] if job["status"] == "done" else None,
+            "error":    job["error"],
+        }
+
+
+def start_model_job(bin_job_id: str, config: dict) -> str:
+    """
+    Launch a background model fitting job.
+    bin_job_id: the completed binning job id (to access cached df + results)
+    config: dict with keys alpha, l1_ratio, auto_tune, cv_folds,
+                          base_score, pdo, score_min, score_max,
+                          selected_cols, outcome_col
+    """
+    # Read what we need from the binning job
+    with _LOCK:
+        bin_job = _JOBS.get(bin_job_id)
+        if bin_job is None:
+            raise KeyError(f"Binning job {bin_job_id} not found")
+        df             = bin_job.get("_df")
+        binning_results = dict(bin_job.get("results", {}))
+        outcome_col    = bin_job.get("outcome_col")
+
+    if df is None:
+        raise RuntimeError("Cached dataframe not found — re-run binning first")
+
+    model_job_id = _new_model_job()
+
+    def _progress(step, total, message):
+        pct = int(step / total * 100)
+        with _MODEL_LOCK:
+            _MODEL_JOBS[model_job_id]["progress"] = pct
+            _MODEL_JOBS[model_job_id]["message"]  = message
+
+    def _run():
+        try:
+            from binning.model import run_model_pipeline
+
+            result = run_model_pipeline(
+                df              = df,
+                binning_results = binning_results,
+                outcome_col     = outcome_col,
+                selected_cols   = config.get("selected_cols", list(binning_results.keys())),
+                alpha           = float(config.get("alpha",     1.0)),
+                l1_ratio        = float(config.get("l1_ratio",  0.5)),
+                auto_tune       = bool(config.get("auto_tune",  False)),
+                cv_folds        = int(config.get("cv_folds",    5)),
+                base_score      = int(config.get("base_score",  1500)),
+                pdo             = int(config.get("pdo",         20)),
+                score_min       = int(config.get("score_min",   1001)),
+                score_max       = int(config.get("score_max",   1999)),
+                progress_cb     = _progress,
+            )
+
+            with _MODEL_LOCK:
+                _MODEL_JOBS[model_job_id]["status"]   = "done"
+                _MODEL_JOBS[model_job_id]["progress"] = 100
+                _MODEL_JOBS[model_job_id]["message"]  = "Done"
+                _MODEL_JOBS[model_job_id]["result"]   = result
+
+        except Exception as exc:
+            import traceback as _tb
+            with _MODEL_LOCK:
+                _MODEL_JOBS[model_job_id]["status"] = "error"
+                _MODEL_JOBS[model_job_id]["error"]  = f"{exc}\n{_tb.format_exc()}"
+
+    threading.Thread(target=_run, daemon=True).start()
+    return model_job_id

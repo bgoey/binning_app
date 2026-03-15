@@ -22,8 +22,8 @@ import traceback
 
 from flask import Flask, jsonify, request, send_from_directory
 
-from binning.jobs   import start_binning_job, get_job, upload_and_profile, rebin_column
-from binning.export import generate_python_code, generate_woe_csv, generate_woe_excel
+from binning.jobs   import start_binning_job, get_job, upload_and_profile, rebin_column, start_model_job, get_model_job
+from binning.export import generate_python_code, generate_woe_csv, generate_woe_excel, generate_apps_script
 from binning.algorithm import enrich_bins
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
@@ -214,6 +214,47 @@ def export_excel():
         )
     except Exception as e:
         return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+
+
+@app.route("/api/export_apps_script", methods=["POST", "OPTIONS"])
+def export_apps_script():
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    try:
+        body    = request.get_json()
+        results = body["results"]
+        script  = generate_apps_script(results)
+        return jsonify({"script": script})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+
+# ────────────────────────────────────────────────────────────────────
+# MODEL — fit elastic net scorecard
+# ────────────────────────────────────────────────────────────────────
+@app.route("/api/model/fit", methods=["POST", "OPTIONS"])
+def model_fit():
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    try:
+        body        = request.get_json()
+        bin_job_id  = body["bin_job_id"]
+        config      = body.get("config", {})
+        model_job_id = start_model_job(bin_job_id, config)
+        return jsonify({"model_job_id": model_job_id})
+    except KeyError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+
+
+@app.route("/api/model/status/<model_job_id>", methods=["GET"])
+def model_status(model_job_id):
+    job = get_model_job(model_job_id)
+    if job is None:
+        return jsonify({"error": "Model job not found"}), 404
+    return jsonify(job)
 
 
 if __name__ == "__main__":
